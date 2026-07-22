@@ -329,11 +329,19 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
+          archive_dir="${GITHUB_WORKSPACE}/dist"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            release_dir="$(cygpath -u "$release_dir")"
+            archive_dir="$(cygpath -u "$archive_dir")"
+            export RUNNER_TEMP="$(cygpath -u "$RUNNER_TEMP")"
+          fi
+
           bash source/.github/scripts/archive-release-symbols-and-strip-binaries.sh \
             --target "$TARGET" \
             --artifact-name "$TARGET" \
-            --release-dir "${CARGO_TARGET_DIR}/${TARGET}/release" \
-            --archive-dir "${GITHUB_WORKSPACE}/dist" \
+            --release-dir "$release_dir" \
+            --archive-dir "$archive_dir" \
             --binaries "$SYMBOL_BINARIES"
       - name: Build release package
         shell: bash
