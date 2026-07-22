@@ -3546,8 +3546,14 @@ impl Config {
             .clone()
             .filter(|value| !value.is_empty());
 
+        let mut built_in_model_providers = built_in_model_providers(openai_base_url);
+        for (provider_id, configured_provider) in &mut cfg.model_providers {
+            if let Some(built_in_provider) = built_in_model_providers.get_mut(provider_id) {
+                built_in_provider.stream_max_retries = configured_provider.stream_max_retries.take();
+            }
+        }
         let model_providers =
-            merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
+            merge_configured_model_providers(built_in_model_providers, cfg.model_providers)
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
 
         let model_provider_id = model_provider

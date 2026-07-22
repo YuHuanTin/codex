@@ -894,12 +894,16 @@ pub fn validate_reserved_model_provider_ids(
     model_providers: &HashMap<String, ModelProviderInfo>,
 ) -> Result<(), String> {
     let mut conflicts = model_providers
-        .keys()
-        .filter(|key| {
+        .iter()
+        .filter(|(key, provider)| {
+            let mut provider = (*provider).clone();
+            provider.stream_max_retries = None;
+
             key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
                 && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
+                && provider != ModelProviderInfo::default()
         })
-        .map(|key| format!("`{key}`"))
+        .map(|(key, _)| format!("`{key}`"))
         .collect::<Vec<_>>();
     conflicts.sort_unstable();
     if conflicts.is_empty() {
@@ -907,7 +911,8 @@ pub fn validate_reserved_model_provider_ids(
     } else {
         Err(format!(
             "model_providers contains reserved built-in provider IDs: {}. \
-Built-in providers cannot be overridden. Rename your custom provider (for example, `openai-custom`).",
+Built-in providers only support overriding `stream_max_retries`. Rename your custom provider \
+(for example, `openai-custom`) for other changes.",
             conflicts.join(", ")
         ))
     }
@@ -918,7 +923,7 @@ pub fn validate_model_providers(
 ) -> Result<(), String> {
     validate_reserved_model_provider_ids(model_providers)?;
     for (key, provider) in model_providers {
-        if key != AMAZON_BEDROCK_PROVIDER_ID {
+        if !RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str()) {
             if provider.aws.is_some() {
                 return Err(format!(
                     "model_providers.{key}: provider aws is only supported for `{AMAZON_BEDROCK_PROVIDER_ID}`"

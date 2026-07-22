@@ -52,9 +52,6 @@ use attempt::run_remote_compact_v2_attempt;
 // Mirror the current /responses/compact retained-message default while the
 // server-side path remains the reference implementation.
 const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
-// Compact attempts can run much longer than normal turns, so keep the per-transport
-// retry budget smaller than the general Responses stream retry budget.
-const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
 
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
@@ -330,11 +327,7 @@ async fn run_remote_compaction_request_v2(
     prompt: &Prompt,
     responses_metadata: &CodexResponsesMetadata,
 ) -> CodexResult<RemoteCompactionV2Output> {
-    let max_retries = turn_context
-        .provider
-        .info()
-        .stream_max_retries()
-        .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
+    let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     loop {
         let result = match client_session
