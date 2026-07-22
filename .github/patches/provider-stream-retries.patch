@@ -53,10 +53,7 @@ index 4e777fb9f..39e01e381 100644
  #[cfg(test)]
  use crate::session::PreviousTurnSettings;
  use crate::session::session::Session;
-@@ -19,7 +20,6 @@ use crate::session::step_context::StepContext;
- use crate::session::turn::get_last_assistant_message_from_turn;
- use crate::session::turn_context::TurnContext;
- use crate::state::AutoCompactWindowIds;
+@@ -22,4 +23,3 @@
 -use crate::util::backoff;
  use codex_analytics::CodexCompactionEvent;
  use codex_analytics::CompactionImplementation;
@@ -157,3 +154,15 @@ index 2af97820f..128643c57 100644
          log_retry(request, turn_context, &err, retry_count, max_retries, delay);
  
          // In release builds, hide the first websocket retry notification to reduce noisy
+diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+--- a/codex-rs/model-provider-info/src/lib.rs
++++ b/codex-rs/model-provider-info/src/lib.rs
+@@ -28,7 +28,7 @@ const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
+ const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
+ pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
+ /// Hard cap for user-configured `stream_max_retries`.
+-const MAX_STREAM_MAX_RETRIES: u64 = 100;
++const MAX_STREAM_MAX_RETRIES: u64 = 1000;
+ /// Hard cap for user-configured `request_max_retries`.
+ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
+ 
