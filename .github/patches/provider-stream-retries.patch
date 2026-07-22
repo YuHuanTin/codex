@@ -1,0 +1,159 @@
+diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
+index 2c3c831ac..11f0eb8b0 100644
+--- a/codex-rs/config/src/config_toml.rs
++++ b/codex-rs/config/src/config_toml.rs
+@@ -894,12 +894,16 @@ pub fn validate_reserved_model_provider_ids(
+     model_providers: &HashMap<String, ModelProviderInfo>,
+ ) -> Result<(), String> {
+     let mut conflicts = model_providers
+-        .keys()
+-        .filter(|key| {
++        .iter()
++        .filter(|(key, provider)| {
++            let mut provider = (*provider).clone();
++            provider.stream_max_retries = None;
++
+             key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
+                 && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
++                && provider != ModelProviderInfo::default()
+         })
+-        .map(|key| format!("`{key}`"))
++        .map(|(key, _)| format!("`{key}`"))
+         .collect::<Vec<_>>();
+     conflicts.sort_unstable();
+     if conflicts.is_empty() {
+@@ -907,7 +911,8 @@ pub fn validate_reserved_model_provider_ids(
+     } else {
+         Err(format!(
+             "model_providers contains reserved built-in provider IDs: {}. \
+-Built-in providers cannot be overridden. Rename your custom provider (for example, `openai-custom`).",
++Built-in providers only support overriding `stream_max_retries`. Rename your custom provider \
++(for example, `openai-custom`) for other changes.",
+             conflicts.join(", ")
+         ))
+     }
+@@ -918,7 +923,7 @@ pub fn validate_model_providers(
+ ) -> Result<(), String> {
+     validate_reserved_model_provider_ids(model_providers)?;
+     for (key, provider) in model_providers {
+-        if key != AMAZON_BEDROCK_PROVIDER_ID {
++        if !RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str()) {
+             if provider.aws.is_some() {
+                 return Err(format!(
+                     "model_providers.{key}: provider aws is only supported for `{AMAZON_BEDROCK_PROVIDER_ID}`"
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 4e777fb9f..39e01e381 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -12,6 +12,7 @@ use crate::hook_runtime::run_pre_compact_hooks;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::CompactionTurnMetadata;
++use crate::responses_retry::STREAM_RETRY_DELAY;
+ #[cfg(test)]
+ use crate::session::PreviousTurnSettings;
+ use crate::session::session::Session;
+@@ -19,7 +20,6 @@ use crate::session::step_context::StepContext;
+ use crate::session::turn::get_last_assistant_message_from_turn;
+ use crate::session::turn_context::TurnContext;
+ use crate::state::AutoCompactWindowIds;
+-use crate::util::backoff;
+ use codex_analytics::CodexCompactionEvent;
+ use codex_analytics::CompactionImplementation;
+ use codex_analytics::CompactionPhase;
+@@ -322,14 +322,13 @@ async fn run_compact_task_inner_impl(
+             Err(e) => {
+                 if retries < max_retries {
+                     retries += 1;
+-                    let delay = backoff(retries);
+                     sess.notify_stream_error(
+                         turn_context.as_ref(),
+                         format!("Reconnecting... {retries}/{max_retries}"),
+                         e,
+                     )
+                     .await;
+-                    tokio::time::sleep(delay).await;
++                    tokio::time::sleep(STREAM_RETRY_DELAY).await;
+                     continue;
+                 } else {
+                     sess.track_turn_codex_error(turn_context.as_ref(), &e);
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index db79083c7..2255d1518 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -52,9 +52,6 @@ use attempt::run_remote_compact_v2_attempt;
+ // Mirror the current /responses/compact retained-message default while the
+ // server-side path remains the reference implementation.
+ const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
+-// Compact attempts can run much longer than normal turns, so keep the per-transport
+-// retry budget smaller than the general Responses stream retry budget.
+-const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
+ 
+ pub(crate) async fn run_inline_remote_auto_compact_task(
+     sess: Arc<Session>,
+@@ -330,11 +327,7 @@ async fn run_remote_compaction_request_v2(
+     prompt: &Prompt,
+     responses_metadata: &CodexResponsesMetadata,
+ ) -> CodexResult<RemoteCompactionV2Output> {
+-    let max_retries = turn_context
+-        .provider
+-        .info()
+-        .stream_max_retries()
+-        .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
++    let max_retries = turn_context.provider.info().stream_max_retries();
+     let mut retries = 0;
+     loop {
+         let result = match client_session
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index bddfe7d60..a3c346e93 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -3546,8 +3546,14 @@ impl Config {
+             .clone()
+             .filter(|value| !value.is_empty());
+ 
++        let mut built_in_model_providers = built_in_model_providers(openai_base_url);
++        for (provider_id, configured_provider) in &mut cfg.model_providers {
++            if let Some(built_in_provider) = built_in_model_providers.get_mut(provider_id) {
++                built_in_provider.stream_max_retries = configured_provider.stream_max_retries.take();
++            }
++        }
+         let model_providers =
+-            merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
++            merge_configured_model_providers(built_in_model_providers, cfg.model_providers)
+                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+ 
+         let model_provider_id = model_provider
+diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
+index 2af97820f..128643c57 100644
+--- a/codex-rs/core/src/responses_retry.rs
++++ b/codex-rs/core/src/responses_retry.rs
+@@ -5,12 +5,13 @@ use std::time::Duration;
+ use crate::client::ModelClientSession;
+ use crate::session::session::Session;
+ use crate::session::turn_context::TurnContext;
+-use crate::util::backoff;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::WarningEvent;
+ use tracing::warn;
+ 
++pub(crate) const STREAM_RETRY_DELAY: Duration = Duration::from_secs(7);
++
+ #[derive(Debug, Clone, Copy)]
+ pub(crate) enum ResponsesStreamRequest {
+     Sampling,
+@@ -48,12 +49,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
+     if *retries < max_retries {
+         *retries += 1;
+         let retry_count = *retries;
+-        let delay = match &err {
+-            CodexErr::Stream(_, requested_delay) => {
+-                requested_delay.unwrap_or_else(|| backoff(retry_count))
+-            }
+-            _ => backoff(retry_count),
+-        };
++        let delay = STREAM_RETRY_DELAY;
+         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
+ 
+         // In release builds, hide the first websocket retry notification to reduce noisy
