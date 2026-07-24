@@ -1,3 +1,24 @@
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -36,7 +36,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+                 identity_error_code: None,
+             })
+         }
+-        ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
++        ApiError::InvalidRequest { message } => CodexErr::Stream(message, None),
+         ApiError::CyberPolicy { message } => CodexErr::CyberPolicy { message },
+         ApiError::Transport(transport) => match transport {
+             TransportError::Http {
+@@ -78,7 +78,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+                     {
+                         CodexErr::InvalidImageRequest()
+                     } else {
+-                        CodexErr::InvalidRequest(body_text)
++                        CodexErr::Stream(body_text, None)
+                     }
+                 } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
+                     CodexErr::InternalServerError
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
 index 2c3c831ac..11f0eb8b0 100644
 --- a/codex-rs/config/src/config_toml.rs
@@ -154,6 +175,66 @@ index 2af97820f..128643c57 100644
          log_retry(request, turn_context, &err, retry_count, max_retries, delay);
  
          // In release builds, hide the first websocket retry notification to reduce noisy
+@@ -60,5 +56,6 @@ pub(crate) async fn handle_retryable_response_stream_error(
+         // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
+-        let report_error = retry_count > 1
++        let report_error = matches!(&err, CodexErr::CyberPolicy { .. })
++            || retry_count > 1
+             || cfg!(debug_assertions)
+             || !sess.services.model_client.responses_websocket_enabled();
+         if report_error {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3845,6 +3845,16 @@ impl Session {
+         message: impl Into<String>,
+         codex_error: CodexErr,
+     ) {
++        if let CodexErr::CyberPolicy { message } = &codex_error {
++            self.send_event(
++                turn_context,
++                EventMsg::Warning(WarningEvent {
++                    message: message.clone(),
++                }),
++            )
++            .await;
++            return;
++        }
+         let additional_details = codex_error.to_string();
+         let codex_error_info = CodexErrorInfo::ResponseStreamDisconnected {
+             http_status_code: codex_error.http_status_code_value(),
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -438,6 +438,14 @@ pub(crate) async fn run_turn(
+             Err(err @ CodexErr::TurnAborted) => {
+                 return Err(err);
+             }
++            Err(CodexErr::CyberPolicy { message }) => {
++                sess.send_event(
++                    &turn_context,
++                    EventMsg::Warning(WarningEvent { message }),
++                )
++                .await;
++                break;
++            }
+             Err(codex_error @ CodexErr::InvalidImageRequest()) => {
+                 sess.track_turn_codex_error(turn_context.as_ref(), &codex_error);
+                 let error = CodexErrorInfo::BadRequest;
+@@ -1188,12 +1196,12 @@ async fn run_sampling_request(
+                 sess.set_total_tokens_full(&turn_context).await;
+                 return Err(CodexErr::ContextWindowExceeded);
+             }
+             Err(CodexErr::UsageLimitReached(e)) => {
+                 let rate_limits = e.rate_limits.clone();
+                 if let Some(rate_limits) = rate_limits {
+                     sess.update_rate_limits(&turn_context, *rate_limits).await;
+                 }
+-                return Err(CodexErr::UsageLimitReached(e));
++                CodexErr::UsageLimitReached(e)
+             }
+             Err(err) => err,
+         };
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
@@ -166,3 +247,26 @@ diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-i
  /// Hard cap for user-configured `request_max_retries`.
  const MAX_REQUEST_MAX_RETRIES: u64 = 100;
  
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -175,5 +175,19 @@ impl CodexErr {
+ impl CodexErr {
+     pub fn is_retryable(&self) -> bool {
++        if matches!(
++            self,
++            CodexErr::UsageNotIncluded
++                | CodexErr::QuotaExceeded
++                | CodexErr::InvalidImageRequest()
++                | CodexErr::UsageLimitReached(_)
++                | CodexErr::RetryLimit(_)
++                | CodexErr::RefreshTokenFailed(_)
++                | CodexErr::ServerOverloaded
++                | CodexErr::CyberPolicy { .. }
++        ) {
++            return true;
++        }
++
+         match self {
+             CodexErr::TurnAborted
+             | CodexErr::SessionBudgetExceeded
